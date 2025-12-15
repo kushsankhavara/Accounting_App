@@ -1,110 +1,121 @@
 package com.example.accounting.service;
 
-import com.example.accounting.dto.CategorySummary;
-import com.example.accounting.dto.MonthlySummary;
-import com.example.accounting.dto.TransactionRequest;
+import com.example.accounting.dto.*;
+import com.example.accounting.model.Account;
 import com.example.accounting.model.Transaction;
 import com.example.accounting.model.TransactionType;
+import com.example.accounting.repository.AccountRepository;
+import com.example.accounting.repository.TransactionRepository;
+import jakarta.persistence.criteria.Predicate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Service
 public class TransactionService {
 
-    private final Map<UUID, Transaction> transactions = new ConcurrentHashMap<>();
+    private final TransactionRepository transactionRepository;
+    private final AccountRepository accountRepository;
 
-    public Transaction add(TransactionRequest request) {
-        UUID id = UUID.randomUUID();
-        Transaction transaction = new Transaction(
-                id,
-                request.getDate(),
-                request.getAmount(),
-                request.getType(),
-                request.getCategory(),
-                request.getAccount(),
-                request.getNote(),
-                request.getPaymentMode()
-        );
-        transactions.put(id, transaction);
-        return transaction;
+    public TransactionService(TransactionRepository transactionRepository, AccountRepository accountRepository) {
+        this.transactionRepository = transactionRepository;
+        this.accountRepository = accountRepository;
     }
 
-    public List<Transaction> find(LocalDate startDate, LocalDate endDate, String category, String account, TransactionType type) {
-        return transactions.values().stream()
-                .filter(tx -> startDate == null || !tx.getDate().isBefore(startDate))
-                .filter(tx -> endDate == null || !tx.getDate().isAfter(endDate))
-                .filter(tx -> category == null || category.equalsIgnoreCase(tx.getCategory()))
-                .filter(tx -> account == null || account.equalsIgnoreCase(tx.getAccount()))
-                .filter(tx -> type == null || tx.getType() == type)
-                .sorted(Comparator.comparing(Transaction::getDate).reversed())
-                .collect(Collectors.toList());
+    @Transactional
+    public TransactionResponse createTransaction(TransactionRequest request) {
+        Account account = accountRepository.findByNameIgnoreCase(request.getAccount())
+                .orElseGet(() -> accountRepository.save(new Account(request.getAccount(), "")));
+
+        Transaction transaction = new Transaction();
+        transaction.setDate(request.getDate());
+        transaction.setAmount(request.getAmount());
+        transaction.setType(request.getType());
+        transaction.setCategory(request.getCategory());
+        transaction.setAccount(account);
+        transaction.setNote(request.getNote());
+        transaction.setPaymentMode(request.getPaymentMode());
+
+        Transaction saved = transactionRepository.save(transaction);
+        return new TransactionResponse(saved);
     }
 
-    public MonthlySummary summarizeMonth(int year, int month) {
-        YearMonth target = YearMonth.of(year, month);
-        List<Transaction> monthTransactions = transactions.values().stream()
-                .filter(tx -> YearMonth.from(tx.getDate()).equals(target))
-                .toList();
-        BigDecimal income = calculateTotal(monthTransactions, TransactionType.INCOME);
-        BigDecimal expense = calculateTotal(monthTransactions, TransactionType.EXPENSE);
+    @Transactional(readOnly = true)
+    public List<TransactionResponse> findTransactions(LocalDate startDate, LocalDate endDate, String category, String accountName, TransactionType type) {
+        List<Transaction> results = transactionRepository.findAll((root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            if (startDate != null) {
+                predicates.add(cb.greaterThanOrEqualTo(root.get("date"), startDate));
+            }
+            if (endDate != null) {
+                predicates.add(cb.lessThanOrEqualTo(root.get("date"), endDate));
+            }
+            if (category != null && !category.isBlank()) {
+                predicates.add(cb.like(cb.lower(root.get("category")), "%" + category.toLowerCase() + "%"));
+            }
+            if (accountName != null && !accountName.isBlank()) {
+                predicates.add(cb.like(cb.lower(root.join("account").get("name")), "%" + accountName.toLowerCase() + "%"));
+            }
+            if (type != null) {
+                predicates.add(cb.equal(root.get("type"), type));
+            }
+            return cb.and(predicates.toArray(new Predicate[0]));
+        });
+
+        return results.stream().map(TransactionResponse::new).collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public MonthlySummary getMonthlySummary(int year, int month) {
+        YearMonth yearMonth = YearMonth.of(year, month);
+        LocalDate start = yearMonth.atDay(1);
+        LocalDate end = yearMonth.atEndOfMonth();
+
+        List<Object[]> totals = transactionRepository.calculateMonthlyTotals(start, end);
+        BigDecimal income = BigDecimal.ZERO;
+        BigDecimal expense = BigDecimal.ZERO;
+        if (!totals.isEmpty()) {
+            Object[] row = totals.get(0);
+            income = (BigDecimal) row[0];
+            expense = (BigDecimal) row[1];
+        }
         return new MonthlySummary(income, expense);
     }
 
-    public List<CategorySummary> summarizeByCategory(LocalDate startDate, LocalDate endDate) {
-        Map<String, BigDecimal> totals = new ConcurrentHashMap<>();
-        find(startDate, endDate, null, null, null).forEach(tx -> {
-            totals.merge(tx.getCategory(), tx.getAmount(), BigDecimal::add);
-        });
-        List<CategorySummary> summaries = new ArrayList<>();
-        totals.forEach((category, total) -> summaries.add(new CategorySummary(category, total)));
-        summaries.sort(Comparator.comparing(CategorySummary::getTotal).reversed());
-        return summaries;
+    @Transactional(readOnly = true)
+    public List<CategorySummary> getCategorySummary(LocalDate startDate, LocalDate endDate) {
+        return transactionRepository.sumByCategory(startDate, endDate)
+                .stream()
+                .map(row -> new CategorySummary((String) row[0], (BigDecimal) row[1]))
+                .collect(Collectors.toList());
     }
 
-    public String exportCsv(LocalDate startDate, LocalDate endDate, String category, String account, TransactionType type) {
-        String header = "id,date,amount,type,category,account,note,paymentMode";
-        List<String> rows = find(startDate, endDate, category, account, type).stream()
-                .map(tx -> String.join(",",
-                        tx.getId().toString(),
-                        tx.getDate().toString(),
-                        tx.getAmount().toPlainString(),
-                        tx.getType().name(),
-                        escape(tx.getCategory()),
-                        escape(tx.getAccount()),
-                        escape(tx.getNote()),
-                        escape(tx.getPaymentMode())))
-                .toList();
-        List<String> csv = new ArrayList<>();
-        csv.add(header);
-        csv.addAll(rows);
-        return String.join("\n", csv);
+    @Transactional(readOnly = true)
+    public List<AccountResponse> getAccounts() {
+        return accountRepository.findAll().stream().map(AccountResponse::new).collect(Collectors.toList());
     }
 
-    private BigDecimal calculateTotal(List<Transaction> items, TransactionType type) {
-        return items.stream()
-                .filter(tx -> tx.getType() == type)
-                .map(Transaction::getAmount)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-    }
-
-    private String escape(String value) {
-        if (value == null) {
-            return "";
+    @Transactional
+    public AccountResponse createAccount(AccountRequest request) {
+        Optional<Account> existing = accountRepository.findByNameIgnoreCase(request.getName());
+        if (existing.isPresent()) {
+            Account account = existing.get();
+            account.setDescription(request.getDescription());
+            return new AccountResponse(accountRepository.save(account));
         }
-        String sanitized = value.replace("\"", "\"\"");
-        if (sanitized.contains(",")) {
-            return "\"" + sanitized + "\"";
-        }
-        return sanitized;
+        Account account = new Account(request.getName(), request.getDescription());
+        return new AccountResponse(accountRepository.save(account));
+    }
+
+    @Transactional
+    public void deleteTransaction(Long id) {
+        transactionRepository.deleteById(id);
     }
 }

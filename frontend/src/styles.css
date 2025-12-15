@@ -63,6 +63,14 @@ button.primary {
   cursor: pointer;
 }
 
+button.link {
+  background: transparent;
+  border: none;
+  color: #dc2626;
+  cursor: pointer;
+  padding: 0;
+}
+
 button.secondary {
   background: #e0e7ff;
   color: #1d4ed8;

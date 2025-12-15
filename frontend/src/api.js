@@ -28,6 +28,15 @@ export const addTransaction = async (payload) => {
   return parseResponse(response);
 };
 
+export const deleteTransaction = async (id) => {
+  const response = await fetch(`${BASE_URL}/transactions/${id}`, {
+    method: 'DELETE'
+  });
+  if (!response.ok && response.status !== 204) {
+    throw new Error('Failed to delete');
+  }
+};
+
 export const fetchMonthlySummary = async (year, month) => {
   const response = await fetch(`${BASE_URL}/summary/monthly?year=${year}&month=${month}`);
   return parseResponse(response);
@@ -39,5 +48,19 @@ export const fetchCategorySummary = async (startDate, endDate) => {
   if (endDate) params.append('endDate', endDate);
   const query = params.toString();
   const response = await fetch(`${BASE_URL}/summary/categories${query ? `?${query}` : ''}`);
+  return parseResponse(response);
+};
+
+export const fetchAccounts = async () => {
+  const response = await fetch(`${BASE_URL}/accounts`);
+  return parseResponse(response);
+};
+
+export const createAccount = async (payload) => {
+  const response = await fetch(`${BASE_URL}/accounts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
   return parseResponse(response);
 };
